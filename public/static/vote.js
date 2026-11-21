@@ -132,8 +132,9 @@
       state.data.races.map(function (r) {
         return h('section', { class: 'card' }, h('h2', null, r.name),
           h('ul', { class: 'sum' }, r.candidates.map(function (c) {
-            return h('li', null, h('span', { class: 'who' }, photo(c, true), h('b', null, c.name)),
-              h('span', { class: 'pill' }, state.picks[c.id] === 'Y' ? '가' : '부'));
+            var yes = state.picks[c.id] === 'Y';
+            return h('li', { class: yes ? 'is-y' : 'is-n' }, h('span', { class: 'who' }, photo(c, true), h('b', null, c.name)),
+              h('span', { class: 'pick ' + (yes ? 'y' : 'n'), 'aria-label': c.name + ' ' + (yes ? '가' : '부') }, yes ? '가' : '부'));
           })));
       }),
       h('div', { class: 'card' },
