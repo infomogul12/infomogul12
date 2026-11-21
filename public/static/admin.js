@@ -14,7 +14,7 @@
   var S = {
     admin: null, elections: [], eid: null, prog: null, tab: 'roster', people: [], races: [], desk: [],
     results: null, audit: [], q: { roster: '', voters: '', desk: '' }, msg: '', err: '', issued: null,
-    confirmClose: false, showNew: false, imported: null, pv: {}, offline: null, offForm: null, offDirty: false
+    confirmClose: false, showNew: false, showPw: false, imported: null, pv: {}, offline: null, offForm: null, offDirty: false
   };
 
   /* ---------- 도우미 ---------- */
@@ -129,6 +129,29 @@
       h('button', { class: 'btn primary', onclick: go }, '로그인')));
   }
 
+  /* ---------- 비밀번호 변경 ---------- */
+  function passwordCard() {
+    var cur = h('input', { type: 'password', id: 'pw0', autocomplete: 'current-password' });
+    var nw = h('input', { type: 'password', id: 'pw1', autocomplete: 'new-password' });
+    var nw2 = h('input', { type: 'password', id: 'pw2', autocomplete: 'new-password' });
+    var out = h('div', { role: 'status' });
+    var show = function (text, kind) { out.replaceChildren(h('div', { class: 'msg ' + kind }, text)); };
+    var go = function () {
+      if (nw.value.length < 12) return show('새 비밀번호는 12자 이상이어야 합니다.', 'err');
+      if (nw.value !== nw2.value) return show('새 비밀번호 확인이 서로 다릅니다.', 'err');
+      api('POST', '/password', { current: cur.value, next: nw.value }).then(function () {
+        cur.value = nw.value = nw2.value = '';
+        show('비밀번호를 바꿨습니다. 다른 곳에서 로그인한 기기는 로그아웃됩니다.', 'good');
+      }).catch(function (e) { show(e.message, 'err'); });
+    };
+    return h('section', { class: 'card' }, h('h2', null, '비밀번호 변경'),
+      h('label', { class: 'f', for: 'pw0' }, '현재 비밀번호', cur),
+      h('label', { class: 'f', for: 'pw1' }, '새 비밀번호 (12자 이상)', nw),
+      h('label', { class: 'f', for: 'pw2' }, '새 비밀번호 확인', nw2), out,
+      h('div', { class: 'row' }, h('button', { class: 'btn primary', onclick: go }, '변경'),
+        h('button', { class: 'btn', onclick: function () { S.showPw = false; render(); } }, '닫기')));
+  }
+
   /* ---------- 공통 화면 ---------- */
   function header() {
     var el = S.elections.find(function (e) { return e.id === S.eid; });
@@ -140,6 +163,7 @@
       h('div', { class: 'row', style: 'margin-top:6px' }, S.elections.length > 1 ? sel : null,
         isChair() ? h('button', { class: 'btn sm', onclick: function () { S.showNew = !S.showNew; render(); } }, '새 선거') : null));
     var right = h('div', { class: 'row' }, phaseControls(), h('span', { class: 'note' }, S.admin.username + ' (' + (isChair() ? '선거관리위원장' : '접수 담당') + ')'),
+      h('button', { class: 'btn sm', onclick: function () { S.showPw = !S.showPw; render(); } }, '비밀번호 변경'),
       h('button', { class: 'btn sm', onclick: function () { api('POST', '/logout').catch(function () {}).then(function () { S.admin = null; renderLogin(); }); } }, '로그아웃'));
     return h('header', { class: 'top noprint' }, left, right);
   }
@@ -454,6 +478,7 @@
   function render() {
     if (!S.admin) return;
     var y = window.scrollY, nodes = [header()];
+    if (S.showPw) nodes.push(passwordCard());
     if (S.showNew && isChair()) nodes.push(newElectionCard());
     if (!S.eid || !S.prog) {
       nodes.push(h('section', { class: 'card' }, h('h2', null, '선거가 없습니다'),
@@ -472,7 +497,7 @@
   // 접수·개표 화면은 10초마다 진행 상황을 새로 고친다(입력 중일 때는 건너뛴다).
   setInterval(function () {
     var tag = document.activeElement && document.activeElement.tagName;
-    if (S.admin && (S.tab === 'desk' || S.tab === 'tally') && tag !== 'INPUT' && tag !== 'SELECT' && !document.hidden && !S.offDirty) { S.msg = ''; refresh(); }
+    if (S.admin && (S.tab === 'desk' || S.tab === 'tally') && tag !== 'INPUT' && tag !== 'SELECT' && !document.hidden && !S.offDirty && !S.showPw) { S.msg = ''; refresh(); }
   }, 10000);
 
   api('GET', '/me').then(function (me) { S.admin = me; S.tab = me.role === 'chair' ? 'roster' : 'desk'; return refresh(); })

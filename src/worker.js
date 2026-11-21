@@ -1,7 +1,7 @@
 // 교회 선출투표 서버 (Cloudflare Worker + D1). 화면 파일은 public/ 에서 함께 제공한다.
 import {
   RULES, needVotes, isPassed, checkOfflineCounts, ageOn, ineligibleReason, newToken, tokenHash, sha256Hex,
-  verifyPassword, randomBytes, randomHex, b64url, detectImageMime, toBase64, fromBase64, toDate, parseUpload,
+  verifyPassword, hashPassword, randomBytes, randomHex, b64url, detectImageMime, toBase64, fromBase64, toDate, parseUpload,
 } from './logic.js';
 
 const MAX_BODY = 6 * 1024 * 1024;
@@ -161,6 +161,30 @@ route('POST', '/api/admin/logout', 'staff', async (c) => {
 });
 
 route('GET', '/api/admin/me', 'staff', async (c) => json(c.admin));
+
+route('POST', '/api/admin/password', 'staff', async (c) => {
+  // 내 비밀번호 변경. 현재 비밀번호를 확인하고, 바꾼 뒤에는 이 브라우저를 뺀 다른 로그인은 모두 끊는다.
+  await rateCheck(c.env, 'pw', String(c.admin.id), 5, 600);
+  const d = parseJson(c);
+  const cur = String(d.current ?? '').slice(0, 200), next = String(d.next ?? '');
+  const row = await one(c.env, 'SELECT password_hash FROM admin_user WHERE id = ?', c.admin.id);
+  if (!row || !(await verifyPassword(cur, row.password_hash))) {
+    await rateFail(c.env, 'pw', String(c.admin.id));
+    throw bad('현재 비밀번호가 올바르지 않습니다.');
+  }
+  if (next.length < 12) throw bad('새 비밀번호는 12자 이상이어야 합니다.');
+  if (new TextEncoder().encode(next).length > 200) throw bad('새 비밀번호가 너무 깁니다.');
+  if (next === cur) throw bad('새 비밀번호가 현재 비밀번호와 같습니다.');
+  if (next.toLowerCase().includes(c.admin.username.toLowerCase())) throw bad('새 비밀번호에 아이디를 포함하지 마세요.');
+  const keep = await sha256Hex(cookieOf(c.req, 'session') || '');
+  await batch(c.env, [
+    stmt(c.env, 'UPDATE admin_user SET password_hash = ? WHERE id = ?', await hashPassword(next), c.admin.id),
+    stmt(c.env, 'DELETE FROM admin_session WHERE admin_id = ? AND token_hash <> ?', c.admin.id, keep),
+    auditStmt(c.env, c.admin.id, null, 'admin.password', {}),
+  ]);
+  await rateClear(c.env, 'pw', String(c.admin.id));
+  return json({ ok: true });
+});
 
 route('GET', '/api/admin/elections', 'staff', async (c) =>
   json(await all(c.env, 'SELECT id, title, base_date, phase, roster_locked FROM election ORDER BY id DESC')));

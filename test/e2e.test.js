@@ -208,3 +208,26 @@ test('엑셀(.xlsx) 교적부 불러오기', async () => {
   assert.equal(people.find((p) => p.name === '김정수').member_ok, true);
   assert.equal(people.find((p) => p.name === '김정수').birth, '1962-03-14');
 });
+
+test('비밀번호 변경', async () => {
+  const env = setup();
+  await addAdmin(env, 'chair1', 'chair', 'old-password-123');
+  const a = new Client(env, '6.6.6.6'), other = new Client(env, '7.7.7.7');
+  await a.call('POST', '/api/admin/login', { username: 'chair1', password: 'old-password-123' });
+  await other.call('POST', '/api/admin/login', { username: 'chair1', password: 'old-password-123' });
+  const change = (cur, next) => a.call('POST', '/api/admin/password', { current: cur, next });
+  assert.equal((await change('wrong', 'brand-new-password-1')).status, 400);          // 현재 비밀번호 틀림
+  assert.equal((await change('old-password-123', 'short')).status, 400);              // 12자 미만
+  assert.equal((await change('old-password-123', 'old-password-123')).status, 400);   // 같은 비밀번호
+  assert.equal((await change('old-password-123', 'xxchair1xxxxxxxx')).status, 400);   // 아이디 포함
+  assert.equal((await new Client(env).call('POST', '/api/admin/password', { current: 'a', next: 'b' })).status, 401);
+  assert.equal((await change('old-password-123', 'brand-new-password-1')).status, 200);
+  assert.equal((await a.call('GET', '/api/admin/me')).status, 200);                    // 바꾼 브라우저는 유지
+  assert.equal((await other.call('GET', '/api/admin/me')).status, 401);                // 다른 로그인은 끊김
+  const fresh = new Client(env, '8.8.8.8');
+  assert.equal((await fresh.call('POST', '/api/admin/login', { username: 'chair1', password: 'old-password-123' })).status, 401);
+  assert.equal((await fresh.call('POST', '/api/admin/login', { username: 'chair1', password: 'brand-new-password-1' })).status, 200);
+  // 현재 비밀번호를 5번 틀리면 잠시 막힌다
+  for (let i = 0; i < 5; i++) await change('wrong' + i, 'brand-new-password-2');
+  assert.equal((await change('brand-new-password-1', 'brand-new-password-2')).status, 429);
+});
