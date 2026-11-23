@@ -187,7 +187,108 @@ route('POST', '/api/admin/password', 'staff', async (c) => {
 });
 
 route('GET', '/api/admin/elections', 'staff', async (c) =>
-  json(await all(c.env, 'SELECT id, title, base_date, phase, roster_locked FROM election ORDER BY id DESC')));
+  json(await all(c.env, 'SELECT id, title, base_date, phase, roster_locked FROM election WHERE hidden = 0 ORDER BY id DESC')));
+
+route('GET', '/api/admin/elections/hidden', 'chair', async (c) =>
+  json(await all(c.env, 'SELECT id, title, base_date, phase FROM election WHERE hidden = 1 ORDER BY id DESC')));
+
+route('POST', '/api/admin/elections/{eid}/hide', 'chair', async (c) => {
+  // 종료된 선거를 목록에서만 숨긴다. 데이터는 그대로이고 언제든 복구할 수 있다.
+  const { eid } = c.params;
+  const el = await getElection(c.env, eid);
+  if (el.phase !== 'closed') throw new HttpError(409, '종료된 선거만 숨길 수 있습니다.');
+  await run(c.env, "UPDATE election SET hidden = 1 WHERE id = ? AND phase = 'closed'", eid);
+  await audit(c.env, c.admin.id, eid, 'election.hide', {});
+  return json({ ok: true });
+});
+
+route('POST', '/api/admin/elections/{eid}/unhide', 'chair', async (c) => {
+  const { eid } = c.params;
+  await getElection(c.env, eid);
+  await run(c.env, 'UPDATE election SET hidden = 0 WHERE id = ?', eid);
+  await audit(c.env, c.admin.id, eid, 'election.unhide', {});
+  return json({ ok: true });
+});
+
+const shuffle = (arr) => {
+  for (let i = arr.length - 1; i > 0; i--) {
+    const j = new Uint32Array(1); crypto.getRandomValues(j);
+    const k = j[0] % (i + 1);
+    [arr[i], arr[k]] = [arr[k], arr[i]];
+  }
+  return arr;
+};
+
+route('GET', '/api/admin/elections/{eid}/backup', 'chair', async (c) => {
+  // 종료된 선거의 자료를 JSON 파일로 내려받는다. strip_time=1이면 모든 시각 정보를 뺀다.
+  // 투표 내용(ballots)은 항상 무작위 순서로 섞고 ID를 빼며, 참여자 목록은 이름순이라 서로 연결할 단서가 없다.
+  const { eid } = c.params, el = await getElection(c.env, eid);
+  if (el.phase !== 'closed') throw new HttpError(409, '종료된 선거만 백업할 수 있습니다.');
+  const strip = ['1', 'true'].includes(c.url.searchParams.get('strip_time') || '');
+  const people = await all(c.env,
+    'SELECT p.id, p.role, p.name, p.birth, p.reg_date, p.member_ok, ' +
+    'EXISTS(SELECT 1 FROM roll r WHERE r.election_id = p.election_id AND r.person_id = p.id) AS in_roll ' +
+    'FROM person p WHERE p.election_id = ? ORDER BY p.name, p.birth', eid);
+  const pkey = new Map(people.map((p, i) => [p.id, 'p' + (i + 1)]));
+  const races = await all(c.env, 'SELECT id, name, rule FROM race WHERE election_id = ? ORDER BY sort_order, id', eid);
+  const cands = await all(c.env,
+    'SELECT c.id, c.race_id, c.person_id FROM candidate c JOIN race r ON r.id = c.race_id WHERE r.election_id = ? ORDER BY r.sort_order, r.id, c.id', eid);
+  const ckey = new Map(cands.map((x, i) => [x.id, 'c' + (i + 1)]));
+  const used = new Map((await all(c.env, "SELECT person_id, issued_at, used_at FROM ticket WHERE election_id = ? AND status = 'used'", eid)).map((t) => [t.person_id, t]));
+  const off = new Map((await all(c.env, 'SELECT person_id, checked_at FROM offline_voter WHERE election_id = ?', eid)).map((t) => [t.person_id, t]));
+  const items = await all(c.env, 'SELECT ballot_id, candidate_id, choice FROM ballot_item WHERE ballot_id IN (SELECT id FROM ballot WHERE election_id = ?)', eid);
+  const byBallot = new Map();
+  for (const it of items) {
+    if (!byBallot.has(it.ballot_id)) byBallot.set(it.ballot_id, {});
+    byBallot.get(it.ballot_id)[ckey.get(it.candidate_id)] = it.choice;
+  }
+  const tally = await one(c.env, 'SELECT ballots, invalid, entered_at FROM offline_tally WHERE election_id = ?', eid);
+  const counts = await all(c.env, 'SELECT candidate_id, yes, no FROM offline_count WHERE election_id = ?', eid);
+  const res = await buildResults(c.env, eid);
+
+  const out = {
+    format: 'church-vote-backup-1',
+    election: { title: el.title, base_date: el.base_date, phase: el.phase },
+    time_removed: strip,
+    note: '이 파일에는 교인의 이름·생년월일이 들어 있습니다. 안전한 곳에 보관하세요. 후보 사진과 관리자 비밀번호는 포함되지 않습니다.',
+    people: people.map((p) => ({ key: pkey.get(p.id), role: p.role, name: p.name, birth: p.birth, reg_date: p.reg_date, member_ok: !!p.member_ok, in_roll: !!p.in_roll })),
+    races: races.map((r) => ({
+      name: r.name, rule: r.rule,
+      candidates: cands.filter((x) => x.race_id === r.id).map((x) => ({ key: ckey.get(x.id), person: pkey.get(x.person_id) })),
+    })),
+    participation: people.filter((p) => p.in_roll).map((p) => {
+      const u = used.get(p.id), o = off.get(p.id);
+      const row = { person: pkey.get(p.id), status: u ? 'online' : o ? 'offline' : 'none' };
+      if (!strip) { if (u) { row.issued_at = u.issued_at; row.used_at = u.used_at; } if (o) row.checked_at = o.checked_at; }
+      return row;
+    }),
+    online_ballots: shuffle([...byBallot.values()]),
+    offline: tally ? {
+      ballots: tally.ballots, invalid: tally.invalid, ...(strip ? {} : { entered_at: tally.entered_at }),
+      counts: Object.fromEntries(counts.map((x) => [ckey.get(x.candidate_id), { yes: x.yes, no: x.no }])),
+    } : null,
+    results: {
+      ballots: res.ballots, offline_pending: res.offline_pending,
+      races: res.races.map((r) => ({
+        name: r.name, rule: r.rule, need: r.need,
+        candidates: r.candidates.map((x) => ({ key: ckey.get(x.candidate_id), name: x.name, yes: x.yes, no: x.no, passed: x.passed })),
+      })),
+    },
+  };
+  if (!strip) {
+    out.generated_at = iso();
+    out.audit = (await all(c.env,
+      'SELECT a.at, u.username, a.action, a.detail FROM audit_log a LEFT JOIN admin_user u ON u.id = a.admin_id WHERE a.election_id = ? ORDER BY a.id', eid))
+      .map((r) => ({ at: r.at, username: r.username, action: r.action, detail: JSON.parse(r.detail) }));
+  }
+  await audit(c.env, c.admin.id, eid, 'election.backup', { time_removed: strip });
+  return new Response(JSON.stringify(out, null, 1), {
+    headers: {
+      'Content-Type': 'application/json; charset=utf-8',
+      'Content-Disposition': `attachment; filename="election-${eid}-backup${strip ? '-notime' : ''}.json"`,
+    },
+  });
+});
 
 route('POST', '/api/admin/elections', 'chair', async (c) => {
   const d = parseJson(c);
@@ -572,16 +673,14 @@ route('PUT', '/api/admin/elections/{eid}/offline-results', 'chair', async (c) =>
   return json({ ok: true });
 });
 
-route('GET', '/api/admin/elections/{eid}/results', 'chair', async (c) => {
-  // 온라인 투표함과 오프라인 입력 결과를 합산해 가결 여부를 판정한다.
-  // 결과에는 후보별 합계(가/부)만 담는다. 온라인과 오프라인을 나눈 후보별 값은 어디에도 내보내지 않는다.
-  const { eid } = c.params, el = await getElection(c.env, eid);
-  if (el.phase !== 'closed') throw new HttpError(409, '투표를 종료한 뒤에만 개표 결과를 볼 수 있습니다.');
-  const onlineN = await countOf(c.env, 'SELECT count(*) AS n FROM ballot WHERE election_id = ?', eid);
-  const used = await countOf(c.env, "SELECT count(*) AS n FROM ticket WHERE election_id = ? AND status = 'used'", eid);
-  const checked = await countOf(c.env, 'SELECT count(*) AS n FROM offline_voter WHERE election_id = ?', eid);
-  const tally = await one(c.env, 'SELECT ballots, invalid FROM offline_tally WHERE election_id = ?', eid);
-  const rows = await all(c.env,
+// 온라인 투표함과 오프라인 입력 결과를 합산해 가결 여부를 판정한다.
+// 결과에는 후보별 합계(가/부)만 담는다. 온라인과 오프라인을 나눈 후보별 값은 어디에도 내보내지 않는다.
+async function buildResults(env, eid) {
+  const onlineN = await countOf(env, 'SELECT count(*) AS n FROM ballot WHERE election_id = ?', eid);
+  const used = await countOf(env, "SELECT count(*) AS n FROM ticket WHERE election_id = ? AND status = 'used'", eid);
+  const checked = await countOf(env, 'SELECT count(*) AS n FROM offline_voter WHERE election_id = ?', eid);
+  const tally = await one(env, 'SELECT ballots, invalid FROM offline_tally WHERE election_id = ?', eid);
+  const rows = await all(env,
     'SELECT r.id AS race_id, r.name AS race_name, r.rule, c.id AS cid, p.id AS pid, p.name, p.role, ' +
     'EXISTS(SELECT 1 FROM person_photo ph WHERE ph.person_id = p.id) AS has_photo, ' +
     "(SELECT count(*) FROM ballot_item bi WHERE bi.candidate_id = c.id AND bi.choice = 'Y') AS yes, " +
@@ -599,11 +698,16 @@ route('GET', '/api/admin/elections/{eid}/results', 'chair', async (c) => {
       candidate_id: r.cid, name: r.name, role: r.role, photo_url: photoUrl(r.pid, !!r.has_photo), yes, no, passed: isPassed(r.rule, n, yes),
     });
   }
-  return json({
+  return {
     ballots: n, online_ballots: onlineN, offline_ballots: offN, offline_checked_in: checked,
     offline_invalid: tally ? tally.invalid : 0, offline_pending: checked > 0 && !tally,
     used_tickets: used, consistent: onlineN === used, races: [...races.values()],
-  });
+  };}
+
+route('GET', '/api/admin/elections/{eid}/results', 'chair', async (c) => {
+  const { eid } = c.params, el = await getElection(c.env, eid);
+  if (el.phase !== 'closed') throw new HttpError(409, '투표를 종료한 뒤에만 개표 결과를 볼 수 있습니다.');
+  return json(await buildResults(c.env, eid));
 });
 
 route('GET', '/api/admin/elections/{eid}/audit', 'chair', async (c) => {

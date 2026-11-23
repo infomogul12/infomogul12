@@ -11,7 +11,7 @@ const root = path.join(path.dirname(fileURLToPath(import.meta.url)), '..');
 const PEPPER = 'p'.repeat(40);
 
 function setup() {
-  const DB = makeD1(path.join(root, 'migrations/0001_init.sql'));
+  const DB = makeD1(path.join(root, 'migrations'));
   const env = {
     DB, VOTE_PEPPER: PEPPER, SESSION_HOURS: '8',
     ASSETS: {
@@ -259,4 +259,55 @@ test('선거 삭제', async () => {
   assert.equal(JSON.parse(rows[0].detail).ballots, 1);
   assert.equal((await chair.call('GET', '/api/admin/elections')).data.length, 0);
   assert.equal((await del('시험 선거')).status, 404);
+});
+
+test('백업(시간 제거 옵션)과 선거 숨기기·복구', async () => {
+  const env = setup();
+  const { chair, eid, cands, eligible } = await prepareElection(env);
+  await chair.call('POST', `/api/admin/elections/${eid}/start`);
+  const voter = new Client(env, '9.1.1.1');
+  for (let i = 0; i < 3; i++) {
+    const t = await chair.call('POST', `/api/admin/elections/${eid}/tickets`, { person_id: eligible[i].id });
+    await voter.call('POST', '/api/vote/submit', { token: t.data.token, choices: { [cands[0]]: 'Y', [cands[1]]: i === 0 ? 'Y' : 'N' } });
+  }
+  await chair.call('POST', `/api/admin/elections/${eid}/offline`, { person_id: eligible[3].id });
+  assert.equal((await chair.call('GET', `/api/admin/elections/${eid}/backup`)).status, 409);   // 진행 중에는 불가
+  assert.equal((await chair.call('POST', `/api/admin/elections/${eid}/hide`)).status, 409);
+  await chair.call('POST', `/api/admin/elections/${eid}/close`);
+  await chair.call('PUT', `/api/admin/elections/${eid}/offline-results`, { ballots: 1, invalid: 0, counts: { [cands[0]]: { yes: 1, no: 0 }, [cands[1]]: { yes: 0, no: 1 } } });
+
+  const plain = await chair.call('GET', `/api/admin/elections/${eid}/backup`);
+  assert.equal(plain.status, 200);
+  assert.match(plain.headers.get('Content-Disposition'), /attachment; filename="election-\d+-backup\.json"/);
+  assert.ok(plain.data.generated_at && Array.isArray(plain.data.audit) && plain.data.audit.length > 3);
+  assert.ok(plain.data.participation.some((p) => p.used_at));
+
+  const strip = await chair.call('GET', `/api/admin/elections/${eid}/backup?strip_time=1`);
+  assert.equal(strip.status, 200);
+  const text = JSON.stringify(strip.data);
+  assert.equal(strip.data.time_removed, true);
+  assert.equal(/\d{4}-\d{2}-\d{2}T\d{2}:/.test(text), false, '시각 값이 남아 있음');
+  for (const key of ['generated_at', 'audit', 'issued_at', 'used_at', 'checked_at', 'entered_at', 'created_at']) assert.equal(text.includes(`"${key}"`), false, key);
+  assert.equal(strip.data.online_ballots.length, 3);
+  assert.equal(JSON.stringify(strip.data.online_ballots).includes('ballot_id'), false);
+  assert.deepEqual(strip.data.participation.filter((p) => p.status === 'online').length, 3);
+  assert.equal(strip.data.participation.filter((p) => p.status === 'offline').length, 1);
+  assert.equal(strip.data.results.ballots, 4);
+  assert.deepEqual(strip.data.participation.map((p) => p.person), strip.data.participation.map((p) => p.person).slice().sort((a, b) => Number(a.slice(1)) - Number(b.slice(1))));   // 이름순(교인 번호순)
+
+  // 숨기기와 복구
+  const desk = new Client(env, '4.4.4.4');
+  await addAdmin(env, 'desk1', 'desk');
+  await desk.call('POST', '/api/admin/login', { username: 'desk1', password: 'long-enough-password' });
+  assert.equal((await desk.call('POST', `/api/admin/elections/${eid}/hide`)).status, 403);
+  assert.equal((await chair.call('POST', `/api/admin/elections/${eid}/hide`)).status, 200);
+  assert.equal((await chair.call('GET', '/api/admin/elections')).data.length, 0);
+  assert.equal((await desk.call('GET', '/api/admin/elections')).data.length, 0);
+  assert.equal((await desk.call('GET', '/api/admin/elections/hidden')).status, 403);
+  assert.equal((await chair.call('GET', '/api/admin/elections/hidden')).data.length, 1);
+  assert.equal((await chair.call('GET', `/api/admin/elections/${eid}/backup?strip_time=1`)).status, 200);   // 숨겨도 백업 가능
+  assert.equal(env.DB.raw.prepare('SELECT count(*) AS n FROM ballot').get().n, 3);                          // 데이터는 그대로
+  assert.equal((await chair.call('POST', `/api/admin/elections/${eid}/unhide`)).status, 200);
+  assert.equal((await chair.call('GET', '/api/admin/elections')).data.length, 1);
+  assert.equal((await chair.call('GET', '/api/admin/elections/hidden')).data.length, 0);
 });

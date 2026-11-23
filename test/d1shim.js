@@ -1,11 +1,11 @@
 // Cloudflare D1와 같은 모양(prepare/bind/all/run/batch)으로 node:sqlite를 감싼 시험용 도구.
 import { DatabaseSync } from 'node:sqlite';
-import { readFileSync } from 'node:fs';
+import { readFileSync, readdirSync } from 'node:fs';
 
 export function makeD1(migrationPath) {
   const db = new DatabaseSync(':memory:');
   db.exec('PRAGMA foreign_keys = ON');
-  db.exec(readFileSync(migrationPath, 'utf8'));
+  for (const f of readdirSync(migrationPath).filter((n) => n.endsWith('.sql')).sort()) db.exec(readFileSync(migrationPath + '/' + f, 'utf8'));
   const isSelect = (sql) => /^\s*(SELECT|WITH)\b/i.test(sql);
   const exec = (sql, args) => {
     const st = db.prepare(sql);
