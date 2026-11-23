@@ -290,6 +290,198 @@ route('GET', '/api/admin/elections/{eid}/backup', 'chair', async (c) => {
   });
 });
 
+// 선거 하나의 모든 자료를 지우는 문장 모음(삭제와 복원 실패 시 되돌리기에서 함께 쓴다). 진행 중인 선거에는 적용되지 않는다.
+function wipeStmts(env, eid) {
+  const guard = "election_id = ?1 AND (SELECT phase FROM election WHERE id = ?1) IN ('setup','closed')";
+  return [
+    stmt(env, `DELETE FROM ballot WHERE ${guard}`, eid),
+    stmt(env, `DELETE FROM offline_count WHERE ${guard}`, eid),
+    stmt(env, `DELETE FROM offline_tally WHERE ${guard}`, eid),
+    stmt(env, `DELETE FROM offline_voter WHERE ${guard}`, eid),
+    stmt(env, `DELETE FROM ticket WHERE ${guard}`, eid),
+    stmt(env, `DELETE FROM roll WHERE ${guard}`, eid),
+    stmt(env, `DELETE FROM audit_log WHERE ${guard}`, eid),
+    stmt(env, "DELETE FROM election WHERE id = ?1 AND phase IN ('setup','closed')", eid),
+  ];
+}
+
+const chunked = (arr, n) => { const out = []; for (let i = 0; i < arr.length; i += n) out.push(arr.slice(i, i + n)); return out; };
+const TS_RX = /^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ$/;
+
+route('POST', '/api/admin/elections/restore', 'chair', async (c) => {
+  // 백업 파일(JSON)로 새 선거를 만든다. 원래 선거는 건드리지 않고, 복원된 선거는 '종료' 상태의 열람용이다.
+  // 먼저 파일 전체를 검사하고(구조, 인원 수, 후보별 가/부 합계가 파일의 개표 결과와 같은지), 저장한 뒤에도 같은 합계를 다시 확인한다.
+  const d = parseJson(c), b = d.backup;
+  const fail = (m) => bad('백업 파일이 올바르지 않습니다: ' + m);
+  const isObj = (x) => x !== null && typeof x === 'object' && !Array.isArray(x);
+  const str = (v, lo, hi, what) => { if (typeof v !== 'string' || v.trim().length < lo || v.trim().length > hi) throw fail(what); return v.trim(); };
+  if (!isObj(b) || b.format !== 'church-vote-backup-1') throw fail('이 프로그램에서 만든 백업 파일이 아닙니다.');
+  if (!isObj(b.election) || b.election.phase !== 'closed') throw fail('종료된 선거의 백업이 아닙니다.');
+  const srcTitle = str(b.election.title, 1, 100, '선거 이름');
+  const baseDate = toDate(b.election.base_date);
+  if (!baseDate) throw fail('선거일');
+  const title = typeof d.title === 'string' && d.title.trim() ? strField(d, 'title', 1, 100, '선거 이름') : `${srcTitle.slice(0, 90)} (복원)`;
+
+  // 교인
+  if (!Array.isArray(b.people) || b.people.length === 0 || b.people.length > 20000) throw fail('교인 목록');
+  const people = new Map(), seen = new Set();
+  for (const p of b.people) {
+    if (!isObj(p)) throw fail('교인 목록');
+    const key = str(p.key, 1, 20, '교인 번호'), name = str(p.name, 1, 50, '교인 이름'), role = str(p.role, 1, 30, '직분');
+    const birth = toDate(p.birth), reg = toDate(p.reg_date);
+    if (!birth || !reg || people.has(key) || seen.has(name + '|' + birth)) throw fail(`교인 정보(${name})`);
+    seen.add(name + '|' + birth);
+    people.set(key, { key, name, role, birth, reg, ok: p.member_ok ? 1 : 0, inRoll: !!p.in_roll });
+  }
+  // 투표 항목과 후보
+  if (!Array.isArray(b.races) || b.races.length === 0 || b.races.length > 100) throw fail('투표 항목');
+  const races = [], cands = new Map();   // cands: 후보 key → {ri, person, race}
+  b.races.forEach((r, ri) => {
+    if (!isObj(r) || (r.rule !== 'half' && r.rule !== 'twothirds') || !Array.isArray(r.candidates) || r.candidates.length === 0) throw fail('투표 항목');
+    const own = new Set();
+    for (const x of r.candidates) {
+      const p = isObj(x) ? people.get(x.person) : null;
+      if (!p || typeof x.key !== 'string' || cands.has(x.key) || own.has(x.person)) throw fail('후보');
+      own.add(x.person);
+      cands.set(x.key, { key: x.key, ri, person: p });
+    }
+    races.push({ name: str(r.name, 1, 100, '투표 항목 이름'), rule: r.rule });
+  });
+  // 참여 현황
+  const part = new Map();
+  for (const x of Array.isArray(b.participation) ? b.participation : []) {
+    const p = isObj(x) ? people.get(x.person) : null;
+    if (!p || !p.inRoll || part.has(x.person) || !['online', 'offline', 'none'].includes(x.status)) throw fail('참여 현황');
+    part.set(x.person, x);
+  }
+  const rows = [...part.values()];
+  const onlineRows = rows.filter((x) => x.status === 'online'), offlineRows = rows.filter((x) => x.status === 'offline');
+  // 온라인 투표함
+  const ballots = Array.isArray(b.online_ballots) ? b.online_ballots : null;
+  if (!ballots || ballots.length !== onlineRows.length) throw fail('온라인 투표 수와 투표 완료 인원이 다릅니다.');
+  const yesN = new Map([...cands.keys()].map((k) => [k, 0])), noN = new Map(yesN);
+  for (const bl of ballots) {
+    const ks = isObj(bl) ? Object.keys(bl) : [];
+    if (ks.length !== cands.size || !ks.every((k) => cands.has(k) && (bl[k] === 'Y' || bl[k] === 'N'))) throw fail('투표 내용');
+    for (const k of ks) (bl[k] === 'Y' ? yesN : noN).set(k, (bl[k] === 'Y' ? yesN : noN).get(k) + 1);
+  }
+  // 오프라인 결과
+  let off = null;
+  const offYes = new Map(), offNo = new Map();
+  if (b.offline !== null && b.offline !== undefined) {
+    const o = b.offline;
+    if (!isObj(o) || !Number.isInteger(o.ballots) || !Number.isInteger(o.invalid) || !isObj(o.counts)) throw fail('오프라인 결과');
+    const counts = {}, names = {};
+    for (const [k, cd] of cands) names[k] = cd.person.name;
+    for (const [k, v] of Object.entries(o.counts)) {
+      if (!cands.has(k) || !isObj(v) || !Number.isInteger(v.yes) || !Number.isInteger(v.no)) throw fail('오프라인 결과');
+      counts[k] = [v.yes, v.no]; offYes.set(k, v.yes); offNo.set(k, v.no);
+    }
+    try { checkOfflineCounts(offlineRows.length, o.ballots, o.invalid, counts, names); } catch (e) { throw fail(e.message); }
+    off = { ballots: o.ballots, invalid: o.invalid, at: TS_RX.test(o.entered_at) ? o.entered_at : hourIso() };
+  }
+  // 파일에 적힌 개표 결과와 투표함에서 다시 센 값이 같아야 한다.
+  const want = new Map();
+  for (const r of Array.isArray(b.results?.races) ? b.results.races : []) for (const x of Array.isArray(r.candidates) ? r.candidates : []) want.set(x.key, x);
+  for (const k of cands.keys()) {
+    const w = want.get(k), y = yesN.get(k) + (offYes.get(k) ?? 0), n = noN.get(k) + (offNo.get(k) ?? 0);
+    if (!w || w.yes !== y || w.no !== n) throw fail('투표 내용을 다시 센 결과가 파일의 개표 결과와 다릅니다. 파일이 바뀌었거나 손상되었을 수 있습니다.');
+  }
+
+  // 저장: 1) 선거 틀 (진행 중 상태가 아닌 setup + 숨김으로 만들어 두고, 끝까지 성공하면 종료 상태로 바꾼다)
+  const stamp = (v) => (TS_RX.test(v) ? v : hourIso());
+  const er = await run(c.env,
+    "INSERT INTO election (title, base_date, phase, roster_locked, created_at, hidden) VALUES (?,?, 'setup', 1, ?, 1)", title, baseDate, iso());
+  const eid = er.meta.last_row_id;
+  const rollback = async () => { try { await batch(c.env, wipeStmts(c.env, eid)); } catch { /* 숨김·setup 상태로 남아 있으면 삭제 기능으로 지운다 */ } };
+  try {
+    const pj = (p) => [p.name, p.birth];
+    const st = [];
+    for (const part1 of chunked([...people.values()], CHUNK)) {
+      st.push(stmt(c.env,
+        "INSERT INTO person (election_id, role, name, birth, reg_date, member_ok) SELECT ?1, json_extract(value,'$[0]'), json_extract(value,'$[1]'), json_extract(value,'$[2]'), json_extract(value,'$[3]'), json_extract(value,'$[4]') FROM json_each(?2)",
+        eid, JSON.stringify(part1.map((p) => [p.role, p.name, p.birth, p.reg, p.ok]))));
+    }
+    st.push(stmt(c.env,
+      "INSERT INTO race (election_id, name, rule, sort_order) SELECT ?1, json_extract(value,'$[0]'), json_extract(value,'$[1]'), json_extract(value,'$[2]') FROM json_each(?2)",
+      eid, JSON.stringify(races.map((r, i) => [r.name, r.rule, i]))));
+    st.push(stmt(c.env,
+      "INSERT INTO candidate (race_id, person_id) SELECT r.id, p.id FROM json_each(?2) j JOIN race r ON r.election_id = ?1 AND r.sort_order = json_extract(j.value,'$[0]') " +
+      "JOIN person p ON p.election_id = ?1 AND p.name = json_extract(j.value,'$[1]') AND p.birth = json_extract(j.value,'$[2]') ORDER BY j.key",
+      eid, JSON.stringify([...cands.values()].map((x) => [x.ri, ...pj(x.person)]))));
+    for (const part1 of chunked([...people.values()].filter((p) => p.inRoll), CHUNK)) {
+      st.push(stmt(c.env,
+        "INSERT INTO roll (election_id, person_id) SELECT ?1, p.id FROM json_each(?2) j JOIN person p ON p.election_id = ?1 AND p.name = json_extract(j.value,'$[0]') AND p.birth = json_extract(j.value,'$[1]')",
+        eid, JSON.stringify(part1.map(pj))));
+    }
+    await batch(c.env, st);
+
+    // 2) 후보 번호 확인
+    const candRows = await all(c.env,
+      'SELECT c.id, r.sort_order AS ri, p.name, p.birth FROM candidate c JOIN race r ON r.id = c.race_id JOIN person p ON p.id = c.person_id WHERE r.election_id = ?', eid);
+    const cid = new Map(candRows.map((r) => [`${r.ri}|${r.name}|${r.birth}`, r.id]));
+    const cidOf = (k) => cid.get(`${cands.get(k).ri}|${cands.get(k).person.name}|${cands.get(k).person.birth}`);
+    const n = await one(c.env,
+      'SELECT (SELECT count(*) FROM person WHERE election_id = ?1) AS p, (SELECT count(*) FROM roll WHERE election_id = ?1) AS r, (SELECT count(*) FROM race WHERE election_id = ?1) AS rc', eid);
+    if (candRows.length !== cands.size || n.p !== people.size || n.rc !== races.length || n.r !== [...people.values()].filter((p) => p.inRoll).length) {
+      throw new Error('mismatch-1');
+    }
+
+    // 3) QR 사용 기록, 오프라인 확인, 오프라인 합계, 투표함
+    const st2 = [];
+    for (const part1 of chunked(onlineRows, CHUNK)) {
+      st2.push(stmt(c.env,
+        "INSERT INTO ticket (election_id, person_id, token_hash, status, issued_at, used_at) SELECT ?1, p.id, json_extract(j.value,'$[2]'), 'used', json_extract(j.value,'$[3]'), json_extract(j.value,'$[4]') " +
+        "FROM json_each(?2) j JOIN person p ON p.election_id = ?1 AND p.name = json_extract(j.value,'$[0]') AND p.birth = json_extract(j.value,'$[1]')",
+        eid, JSON.stringify(part1.map((x) => [...pj(people.get(x.person)), randomHex(32), stamp(x.issued_at), stamp(x.used_at)]))));
+    }
+    for (const part1 of chunked(offlineRows, CHUNK)) {
+      st2.push(stmt(c.env,
+        "INSERT INTO offline_voter (election_id, person_id, checked_at) SELECT ?1, p.id, json_extract(j.value,'$[2]') " +
+        "FROM json_each(?2) j JOIN person p ON p.election_id = ?1 AND p.name = json_extract(j.value,'$[0]') AND p.birth = json_extract(j.value,'$[1]')",
+        eid, JSON.stringify(part1.map((x) => [...pj(people.get(x.person)), stamp(x.checked_at)]))));
+    }
+    if (off) {
+      st2.push(stmt(c.env, 'INSERT INTO offline_tally (election_id, ballots, invalid, entered_at) VALUES (?,?,?,?)', eid, off.ballots, off.invalid, off.at));
+      st2.push(stmt(c.env,
+        "INSERT INTO offline_count (election_id, candidate_id, yes, no) SELECT ?1, json_extract(value,'$[0]'), json_extract(value,'$[1]'), json_extract(value,'$[2]') FROM json_each(?2)",
+        eid, JSON.stringify([...cands.keys()].map((k) => [cidOf(k), offYes.get(k) ?? 0, offNo.get(k) ?? 0]))));
+    }
+    const bids = ballots.map(() => randomHex(16));
+    for (const part1 of chunked(bids, 800)) {
+      st2.push(stmt(c.env, 'INSERT INTO ballot (id, election_id) SELECT value, ?1 FROM json_each(?2)', eid, JSON.stringify(part1)));
+    }
+    const items = [];
+    ballots.forEach((bl, i) => { for (const k of Object.keys(bl)) items.push([bids[i], cidOf(k), bl[k]]); });
+    for (const part1 of chunked(items, 800)) {
+      st2.push(stmt(c.env,
+        "INSERT INTO ballot_item (ballot_id, candidate_id, choice) SELECT json_extract(value,'$[0]'), json_extract(value,'$[1]'), json_extract(value,'$[2]') FROM json_each(?1)",
+        JSON.stringify(part1)));
+    }
+    await batch(c.env, st2);
+
+    // 4) 저장된 값으로 다시 개표해 파일의 결과와 맞는지 확인한 뒤, 종료 상태로 바꿔 목록에 나타낸다.
+    const res = await buildResults(c.env, eid);
+    if (res.ballots !== b.results.ballots || !res.consistent) throw new Error('mismatch-2');
+    for (const r of res.races) for (const x of r.candidates) {
+      const k = [...cands.keys()].find((kk) => cidOf(kk) === x.candidate_id);
+      if (x.yes !== want.get(k).yes || x.no !== want.get(k).no) throw new Error('mismatch-3');
+    }
+    await batch(c.env, [
+      stmt(c.env, "UPDATE election SET phase = 'closed', hidden = 0 WHERE id = ? AND phase = 'setup'", eid),
+      auditStmt(c.env, c.admin.id, eid, 'election.restore', {
+        source_title: srcTitle, people: people.size, online_ballots: ballots.length, offline_ballots: off ? off.ballots : 0, time_removed: b.time_removed === true,
+      }),
+    ]);
+  } catch (e) {
+    await rollback();
+    if (e instanceof HttpError) throw e;
+    if (/^mismatch/.test(String(e?.message))) throw new HttpError(500, '복원한 자료가 파일과 일치하지 않아 중단하고 되돌렸습니다. 다시 시도하세요.');
+    throw e;
+  }
+  return json({ id: eid, title });
+});
+
 route('POST', '/api/admin/elections', 'chair', async (c) => {
   const d = parseJson(c);
   const title = strField(d, 'title', 1, 100, '선거 이름'), base = dateField(d, 'base_date', '선거일');
@@ -327,17 +519,7 @@ route('DELETE', '/api/admin/elections/{eid}', 'chair', async (c) => {
     ballots: await n('SELECT count(*) AS n FROM ballot WHERE election_id = ?'),
   };
   // 모든 문장에 같은 조건(진행 중이 아님)을 걸어, 삭제 도중 상태가 바뀌어도 일부만 지워지지 않게 한다.
-  const guard = "election_id = ?1 AND (SELECT phase FROM election WHERE id = ?1) IN ('setup','closed')";
-  const res = await batch(c.env, [
-    stmt(c.env, `DELETE FROM ballot WHERE ${guard}`, eid),
-    stmt(c.env, `DELETE FROM offline_count WHERE ${guard}`, eid),
-    stmt(c.env, `DELETE FROM offline_tally WHERE ${guard}`, eid),
-    stmt(c.env, `DELETE FROM offline_voter WHERE ${guard}`, eid),
-    stmt(c.env, `DELETE FROM ticket WHERE ${guard}`, eid),
-    stmt(c.env, `DELETE FROM roll WHERE ${guard}`, eid),
-    stmt(c.env, `DELETE FROM audit_log WHERE ${guard}`, eid),
-    stmt(c.env, "DELETE FROM election WHERE id = ?1 AND phase IN ('setup','closed')", eid),
-  ]);
+  const res = await batch(c.env, wipeStmts(c.env, eid));
   if (changes(res[res.length - 1]) !== 1) throw new HttpError(409, '선거를 삭제하지 못했습니다. 상태를 새로 고침하세요.');
   // 삭제 사실만 남긴다(개인정보 없음).
   await audit(c.env, c.admin.id, null, 'election.delete', { election_id: eid, ...summary });

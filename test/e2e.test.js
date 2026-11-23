@@ -311,3 +311,73 @@ test('백업(시간 제거 옵션)과 선거 숨기기·복구', async () => {
   assert.equal((await chair.call('GET', '/api/admin/elections')).data.length, 1);
   assert.equal((await chair.call('GET', '/api/admin/elections/hidden')).data.length, 0);
 });
+
+test('백업 파일로 선거 복원', async () => {
+  const env = setup();
+  const { chair, eid, cands, eligible } = await prepareElection(env);
+  await chair.call('POST', `/api/admin/elections/${eid}/start`);
+  const voter = new Client(env, '9.1.1.1');
+  for (let i = 0; i < 3; i++) {
+    const t = await chair.call('POST', `/api/admin/elections/${eid}/tickets`, { person_id: eligible[i].id });
+    await voter.call('POST', '/api/vote/submit', { token: t.data.token, choices: { [cands[0]]: 'Y', [cands[1]]: i === 0 ? 'Y' : 'N' } });
+  }
+  await chair.call('POST', `/api/admin/elections/${eid}/offline`, { person_id: eligible[3].id });
+  await chair.call('POST', `/api/admin/elections/${eid}/close`);
+  await chair.call('PUT', `/api/admin/elections/${eid}/offline-results`, { ballots: 1, invalid: 0, counts: { [cands[0]]: { yes: 1, no: 0 }, [cands[1]]: { yes: 0, no: 1 } } });
+  const orig = (await chair.call('GET', `/api/admin/elections/${eid}/results`)).data;
+  const tally = (r) => r.races.map((x) => x.candidates.map((y) => [y.name, y.yes, y.no, y.passed]));
+
+  const strip = (await chair.call('GET', `/api/admin/elections/${eid}/backup?strip_time=1`)).data;
+  const plain = (await chair.call('GET', `/api/admin/elections/${eid}/backup`)).data;
+
+  // 권한
+  const desk = new Client(env, '4.4.4.4');
+  await addAdmin(env, 'desk1', 'desk');
+  await desk.call('POST', '/api/admin/login', { username: 'desk1', password: 'long-enough-password' });
+  assert.equal((await desk.call('POST', '/api/admin/elections/restore', { backup: strip })).status, 403);
+
+  // 원래 선거를 삭제한 뒤 시간 제거 백업으로 복원
+  assert.equal((await chair.call('DELETE', `/api/admin/elections/${eid}`, { confirm_title: '시험 선거' })).status, 200);
+  const r1 = await chair.call('POST', '/api/admin/elections/restore', { backup: strip });
+  assert.equal(r1.status, 200, JSON.stringify(r1.data));
+  assert.equal(r1.data.title, '시험 선거 (복원)');
+  const res1 = (await chair.call('GET', `/api/admin/elections/${r1.data.id}/results`)).data;
+  assert.deepEqual(tally(res1), tally(orig));
+  assert.equal(res1.ballots, 4); assert.equal(res1.online_ballots, 3); assert.equal(res1.offline_ballots, 1);
+  assert.equal(res1.consistent, true);
+  const list = (await chair.call('GET', '/api/admin/elections')).data;
+  assert.equal(list.length, 1); assert.equal(list[0].phase, 'closed');
+  // 복원본에서 다시 백업하면 같은 내용(시간 제외)
+  const again = (await chair.call('GET', `/api/admin/elections/${r1.data.id}/backup?strip_time=1`)).data;
+  assert.deepEqual(again.people, strip.people);
+  assert.deepEqual(again.results, strip.results);
+  assert.equal(again.participation.filter((p) => p.status === 'online').length, 3);
+  assert.equal(env.DB.raw.prepare("SELECT count(*) AS n FROM ticket WHERE status = 'used'").get().n, 3);
+  // 복원본은 진행·수정할 수 없다
+  assert.equal((await chair.call('POST', `/api/admin/elections/${r1.data.id}/start`)).status >= 400, true);
+
+  // 시각이 있는 백업 + 이름 지정, 원본과 별도 선거로 하나 더
+  const r2 = await chair.call('POST', '/api/admin/elections/restore', { backup: plain, title: '복원본 2' });
+  assert.equal(r2.status, 200, JSON.stringify(r2.data));
+  assert.equal(r2.data.title, '복원본 2');
+  assert.deepEqual(tally((await chair.call('GET', `/api/admin/elections/${r2.data.id}/results`)).data), tally(orig));
+  assert.ok(env.DB.raw.prepare('SELECT action FROM audit_log WHERE action = ?').get('election.restore'));
+
+  // 잘못된 파일은 거절하고 아무것도 남기지 않는다
+  const count = (tbl) => env.DB.raw.prepare(`SELECT count(*) AS n FROM ${tbl}`).get().n;
+  const before = [count('election'), count('person'), count('ballot')];
+  const clone = () => JSON.parse(JSON.stringify(strip));
+  const tampered = clone(); tampered.online_ballots[0][Object.keys(tampered.online_ballots[0])[0]] = tampered.online_ballots[0][Object.keys(tampered.online_ballots[0])[0]] === 'Y' ? 'N' : 'Y';
+  const fewer = clone(); fewer.online_ballots.pop();
+  const unknownKey = clone(); unknownKey.online_ballots[0].zz = 'Y';
+  const wrongFormat = clone(); wrongFormat.format = 'x';
+  const dupPerson = clone(); dupPerson.people.push({ ...dupPerson.people[0], key: 'pdup' });
+  const badRace = clone(); badRace.races[0].candidates[0].person = 'nobody';
+  const badOffline = clone(); badOffline.offline.counts[Object.keys(badOffline.offline.counts)[0]].yes += 1;
+  for (const [name, bk] of Object.entries({ tampered, fewer, unknownKey, wrongFormat, dupPerson, badRace, badOffline })) {
+    const r = await chair.call('POST', '/api/admin/elections/restore', { backup: bk });
+    assert.equal(r.status, 400, `${name}: ${JSON.stringify(r.data)}`);
+  }
+  assert.equal((await chair.call('POST', '/api/admin/elections/restore', {})).status, 400);
+  assert.deepEqual([count('election'), count('person'), count('ballot')], before);
+});

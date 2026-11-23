@@ -4,7 +4,7 @@
   var RULE = { half: '과반', twothirds: '3분의 2 이상' };
   var STAT = { none: ['미접수', ''], issued: ['QR 발급', 'warn'], used: ['투표 완료', 'ok'], offline: ['오프라인 투표', 'acc'] };
   var ACTION = {
-    'election.create': '선거 생성', 'election.delete': '선거 삭제', 'election.hide': '선거 숨김', 'election.unhide': '선거 숨김 해제', 'election.backup': '백업 내려받기', 'election.update': '선거 정보 수정', 'election.start': '투표 시작', 'election.close': '투표 종료',
+    'election.create': '선거 생성', 'election.delete': '선거 삭제', 'election.hide': '선거 숨김', 'election.unhide': '선거 숨김 해제', 'election.backup': '백업 내려받기', 'election.restore': '백업으로 선거 복원', 'election.update': '선거 정보 수정', 'election.start': '투표 시작', 'election.close': '투표 종료',
     'people.import': '교적부 불러오기', 'people.member_ok': '무흠 입교 체크', 'roll.lock': '선거인명부 확정', 'roll.unlock': '선거인명부 확정 취소',
     'race.create': '투표 항목 추가', 'race.rule': '가결 기준 변경', 'race.delete': '투표 항목 삭제',
     'candidate.add': '후보 추가', 'candidate.delete': '후보 삭제', 'photo.upload': '후보 사진 등록', 'photo.delete': '후보 사진 삭제',
@@ -14,7 +14,7 @@
   var S = {
     admin: null, elections: [], eid: null, prog: null, tab: 'roster', people: [], races: [], desk: [],
     results: null, audit: [], q: { roster: '', voters: '', desk: '' }, msg: '', err: '', issued: null,
-    confirmClose: false, showNew: false, showPw: false, showDel: false, showBackup: false, showHidden: false, stripTime: true, hidden: [], imported: null, pv: {}, offline: null, offForm: null, offDirty: false
+    confirmClose: false, showNew: false, showPw: false, showDel: false, showBackup: false, showHidden: false, showRestore: false, stripTime: true, hidden: [], imported: null, pv: {}, offline: null, offForm: null, offDirty: false
   };
 
   /* ---------- 도우미 ---------- */
@@ -193,6 +193,32 @@
       h('div', { class: 'row' }, h('button', { class: 'btn', onclick: function () { S.showHidden = false; render(); } }, '닫기')));
   }
 
+  /* ---------- 백업으로 복원 ---------- */
+  function restoreCard() {
+    var file = h('input', { type: 'file', id: 'rfile', accept: '.json,application/json' });
+    var ttl = h('input', { type: 'text', id: 'rtitle', autocomplete: 'off', placeholder: '비워 두면 "원래 이름 (복원)"' });
+    var out = h('div', { role: 'status' });
+    var go = h('button', { class: 'btn primary', onclick: function () {
+      var f = file.files && file.files[0];
+      if (!f) { out.replaceChildren(h('div', { class: 'msg err' }, '백업 파일(.json)을 선택하세요.')); return; }
+      if (f.size > 5 * 1024 * 1024) { out.replaceChildren(h('div', { class: 'msg err' }, '파일이 너무 큽니다(5MB 이하).')); return; }
+      go.disabled = true; out.replaceChildren(h('div', { class: 'msg' }, '복원하는 중입니다…'));
+      f.text().then(function (t) {
+        var data; try { data = JSON.parse(t); } catch (e) { throw new Error('JSON 파일이 아닙니다.'); }
+        var body = { backup: data }; if (ttl.value.trim()) body.title = ttl.value.trim();
+        return api('POST', '/elections/restore', body);
+      }).then(function (r) {
+        S.showRestore = false; S.eid = r.id; S.tab = 'tally'; S.msg = '선거 "' + r.title + '"를 복원했습니다. 종료된 선거로 열람할 수 있습니다.'; S.err = '';
+        return refresh();
+      }).catch(function (e) { go.disabled = false; out.replaceChildren(h('div', { class: 'msg err' }, e.message)); });
+    } }, '복원');
+    return h('section', { class: 'card' }, h('h2', null, '백업으로 선거 복원'),
+      h('p', { class: 'lead' }, '이 프로그램에서 내려받은 백업 파일로 새 선거를 만듭니다. 원래 선거는 그대로 두고, 복원된 선거는 종료된 상태로 교적부·선거인명부·후보·참여 현황·개표 결과를 열람할 수 있습니다. 후보 사진은 백업에 없으므로 복원되지 않습니다.'),
+      h('p', { class: 'note' }, '파일 안의 투표 내용을 다시 센 결과가 파일의 개표 결과와 다르면 복원하지 않습니다. 시간 정보를 뺀 백업은 QR·확인 시각이 복원한 시각(시 단위)으로 채워집니다.'),
+      h('label', { class: 'f', for: 'rfile' }, '백업 파일', file), h('label', { class: 'f', for: 'rtitle' }, '선거 이름(선택)', ttl), out,
+      h('div', { class: 'row' }, go, h('button', { class: 'btn', onclick: function () { S.showRestore = false; render(); } }, '닫기')));
+  }
+
   /* ---------- 선거 삭제 ---------- */
   function deleteCard() {
     var el = S.elections.find(function (e) { return e.id === S.eid; });
@@ -225,6 +251,7 @@
         isChair() ? h('button', { class: 'btn sm', onclick: function () { S.showNew = !S.showNew; render(); } }, '새 선거') : null,
         isChair() && el && S.prog && S.prog.phase === 'closed' ? h('button', { class: 'btn sm', onclick: function () { S.showBackup = !S.showBackup; render(); } }, '백업') : null,
         isChair() && el && S.prog && S.prog.phase === 'closed' ? h('button', { class: 'btn sm', onclick: function () { hideElection(el); } }, '숨기기') : null,
+        isChair() ? h('button', { class: 'btn sm', onclick: function () { S.showRestore = !S.showRestore; render(); } }, '백업에서 복원') : null,
         isChair() && S.hidden.length ? h('button', { class: 'btn sm', onclick: function () { S.showHidden = !S.showHidden; render(); } }, '숨긴 선거 (' + S.hidden.length + ')') : null,
         isChair() && el && S.prog && S.prog.phase !== 'open' ? h('button', { class: 'btn sm danger', onclick: function () { S.showDel = !S.showDel; render(); } }, '선거 삭제') : null));
     var right = h('div', { class: 'row' }, phaseControls(), h('span', { class: 'note' }, S.admin.username + ' (' + (isChair() ? '선거관리위원장' : '접수 담당') + ')'),
@@ -547,6 +574,7 @@
     if (S.showDel && isChair()) { var dc = deleteCard(); if (dc) nodes.push(dc); }
     if (S.showBackup && isChair()) { var bc = backupCard(); if (bc) nodes.push(bc); }
     if (S.showHidden && isChair() && S.hidden.length) nodes.push(hiddenCard());
+    if (S.showRestore && isChair()) nodes.push(restoreCard());
     if (S.showNew && isChair()) nodes.push(newElectionCard());
     if (!S.eid || !S.prog) {
       nodes.push(h('section', { class: 'card' }, h('h2', null, '선거가 없습니다'),
@@ -565,7 +593,7 @@
   // 접수·개표 화면은 10초마다 진행 상황을 새로 고친다(입력 중일 때는 건너뛴다).
   setInterval(function () {
     var tag = document.activeElement && document.activeElement.tagName;
-    if (S.admin && (S.tab === 'desk' || S.tab === 'tally') && tag !== 'INPUT' && tag !== 'SELECT' && !document.hidden && !S.offDirty && !S.showPw && !S.showDel && !S.showBackup && !S.showHidden) { S.msg = ''; refresh(); }
+    if (S.admin && (S.tab === 'desk' || S.tab === 'tally') && tag !== 'INPUT' && tag !== 'SELECT' && !document.hidden && !S.offDirty && !S.showPw && !S.showDel && !S.showBackup && !S.showHidden && !S.showRestore) { S.msg = ''; refresh(); }
   }, 10000);
 
   api('GET', '/me').then(function (me) { S.admin = me; S.tab = me.role === 'chair' ? 'roster' : 'desk'; return refresh(); })
