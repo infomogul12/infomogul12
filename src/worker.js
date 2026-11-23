@@ -215,6 +215,34 @@ route('PATCH', '/api/admin/elections/{eid}', 'chair', async (c) => {
   return json({ ok: true });
 });
 
+route('DELETE', '/api/admin/elections/{eid}', 'chair', async (c) => {
+  // 끝난(또는 시작하지 않은) 선거와 그 안의 모든 자료(교적부, QR, 투표함, 사진, 기록)를 지운다. 진행 중인 선거는 지울 수 없다.
+  const { eid } = c.params, d = parseJson(c), el = await getElection(c.env, eid);
+  if (el.phase === 'open') throw new HttpError(409, '진행 중인 선거는 삭제할 수 없습니다. 먼저 투표를 종료하세요.');
+  if (typeof d.confirm_title !== 'string' || d.confirm_title.trim() !== el.title.trim()) throw bad('확인을 위해 선거 이름을 정확히 입력하세요.');
+  const n = (sql) => countOf(c.env, sql, eid);
+  const summary = {
+    title: el.title, phase: el.phase, people: await n('SELECT count(*) AS n FROM person WHERE election_id = ?'),
+    ballots: await n('SELECT count(*) AS n FROM ballot WHERE election_id = ?'),
+  };
+  // 모든 문장에 같은 조건(진행 중이 아님)을 걸어, 삭제 도중 상태가 바뀌어도 일부만 지워지지 않게 한다.
+  const guard = "election_id = ?1 AND (SELECT phase FROM election WHERE id = ?1) IN ('setup','closed')";
+  const res = await batch(c.env, [
+    stmt(c.env, `DELETE FROM ballot WHERE ${guard}`, eid),
+    stmt(c.env, `DELETE FROM offline_count WHERE ${guard}`, eid),
+    stmt(c.env, `DELETE FROM offline_tally WHERE ${guard}`, eid),
+    stmt(c.env, `DELETE FROM offline_voter WHERE ${guard}`, eid),
+    stmt(c.env, `DELETE FROM ticket WHERE ${guard}`, eid),
+    stmt(c.env, `DELETE FROM roll WHERE ${guard}`, eid),
+    stmt(c.env, `DELETE FROM audit_log WHERE ${guard}`, eid),
+    stmt(c.env, "DELETE FROM election WHERE id = ?1 AND phase IN ('setup','closed')", eid),
+  ]);
+  if (changes(res[res.length - 1]) !== 1) throw new HttpError(409, '선거를 삭제하지 못했습니다. 상태를 새로 고침하세요.');
+  // 삭제 사실만 남긴다(개인정보 없음).
+  await audit(c.env, c.admin.id, null, 'election.delete', { election_id: eid, ...summary });
+  return json({ ok: true });
+});
+
 route('GET', '/api/admin/elections/{eid}/progress', 'staff', async (c) => {
   // 투표율만 알려 준다. 후보별 득표는 어디에도 나오지 않는다.
   const { eid } = c.params, el = await getElection(c.env, eid);

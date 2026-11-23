@@ -4,7 +4,7 @@
   var RULE = { half: '과반', twothirds: '3분의 2 이상' };
   var STAT = { none: ['미접수', ''], issued: ['QR 발급', 'warn'], used: ['투표 완료', 'ok'], offline: ['오프라인 투표', 'acc'] };
   var ACTION = {
-    'election.create': '선거 생성', 'election.update': '선거 정보 수정', 'election.start': '투표 시작', 'election.close': '투표 종료',
+    'election.create': '선거 생성', 'election.delete': '선거 삭제', 'election.update': '선거 정보 수정', 'election.start': '투표 시작', 'election.close': '투표 종료',
     'people.import': '교적부 불러오기', 'people.member_ok': '무흠 입교 체크', 'roll.lock': '선거인명부 확정', 'roll.unlock': '선거인명부 확정 취소',
     'race.create': '투표 항목 추가', 'race.rule': '가결 기준 변경', 'race.delete': '투표 항목 삭제',
     'candidate.add': '후보 추가', 'candidate.delete': '후보 삭제', 'photo.upload': '후보 사진 등록', 'photo.delete': '후보 사진 삭제',
@@ -14,7 +14,7 @@
   var S = {
     admin: null, elections: [], eid: null, prog: null, tab: 'roster', people: [], races: [], desk: [],
     results: null, audit: [], q: { roster: '', voters: '', desk: '' }, msg: '', err: '', issued: null,
-    confirmClose: false, showNew: false, showPw: false, imported: null, pv: {}, offline: null, offForm: null, offDirty: false
+    confirmClose: false, showNew: false, showPw: false, showDel: false, imported: null, pv: {}, offline: null, offForm: null, offDirty: false
   };
 
   /* ---------- 도우미 ---------- */
@@ -152,6 +152,26 @@
         h('button', { class: 'btn', onclick: function () { S.showPw = false; render(); } }, '닫기')));
   }
 
+  /* ---------- 선거 삭제 ---------- */
+  function deleteCard() {
+    var el = S.elections.find(function (e) { return e.id === S.eid; });
+    if (!el) return null;
+    var input = h('input', { type: 'text', id: 'delTitle', autocomplete: 'off', 'aria-label': '삭제할 선거 이름 입력' });
+    var out = h('div', { role: 'status' });
+    var go = function () {
+      if (input.value.trim() !== el.title.trim()) { out.replaceChildren(h('div', { class: 'msg err' }, '선거 이름이 일치하지 않습니다.')); return; }
+      api('DELETE', '/elections/' + el.id, { confirm_title: input.value }).then(function () {
+        S.showDel = false; S.eid = null; S.prog = null; S.msg = '선거 "' + el.title + '"와 모든 자료를 삭제했습니다.'; S.err = '';
+        return refresh();
+      }).catch(function (e) { out.replaceChildren(h('div', { class: 'msg err' }, e.message)); });
+    };
+    return h('section', { class: 'card' }, h('h2', null, '선거 삭제'),
+      h('p', { class: 'lead' }, '"' + el.title + '"의 교적부, 선거인명부, QR, 투표함, 후보 사진, 오프라인 결과, 작업 기록이 모두 지워지고 되돌릴 수 없습니다. 결과 보고서를 먼저 저장하세요. 삭제하려면 선거 이름을 아래에 똑같이 입력하세요.'),
+      h('label', { class: 'f', for: 'delTitle' }, '선거 이름', input), out,
+      h('div', { class: 'row' }, h('button', { class: 'btn danger', onclick: go }, '완전히 삭제'),
+        h('button', { class: 'btn', onclick: function () { S.showDel = false; render(); } }, '취소')));
+  }
+
   /* ---------- 공통 화면 ---------- */
   function header() {
     var el = S.elections.find(function (e) { return e.id === S.eid; });
@@ -161,7 +181,8 @@
     sel.addEventListener('change', function () { S.eid = +sel.value; S.issued = null; S.imported = null; S.confirmClose = false; refresh(); });
     var left = h('div', null, h('h1', null, el ? el.title : '교회 선출투표'),
       h('div', { class: 'row', style: 'margin-top:6px' }, S.elections.length > 1 ? sel : null,
-        isChair() ? h('button', { class: 'btn sm', onclick: function () { S.showNew = !S.showNew; render(); } }, '새 선거') : null));
+        isChair() ? h('button', { class: 'btn sm', onclick: function () { S.showNew = !S.showNew; render(); } }, '새 선거') : null,
+        isChair() && el && S.prog && S.prog.phase !== 'open' ? h('button', { class: 'btn sm danger', onclick: function () { S.showDel = !S.showDel; render(); } }, '선거 삭제') : null));
     var right = h('div', { class: 'row' }, phaseControls(), h('span', { class: 'note' }, S.admin.username + ' (' + (isChair() ? '선거관리위원장' : '접수 담당') + ')'),
       h('button', { class: 'btn sm', onclick: function () { S.showPw = !S.showPw; render(); } }, '비밀번호 변경'),
       h('button', { class: 'btn sm', onclick: function () { api('POST', '/logout').catch(function () {}).then(function () { S.admin = null; renderLogin(); }); } }, '로그아웃'));
@@ -479,6 +500,7 @@
     if (!S.admin) return;
     var y = window.scrollY, nodes = [header()];
     if (S.showPw) nodes.push(passwordCard());
+    if (S.showDel && isChair()) { var dc = deleteCard(); if (dc) nodes.push(dc); }
     if (S.showNew && isChair()) nodes.push(newElectionCard());
     if (!S.eid || !S.prog) {
       nodes.push(h('section', { class: 'card' }, h('h2', null, '선거가 없습니다'),
@@ -497,7 +519,7 @@
   // 접수·개표 화면은 10초마다 진행 상황을 새로 고친다(입력 중일 때는 건너뛴다).
   setInterval(function () {
     var tag = document.activeElement && document.activeElement.tagName;
-    if (S.admin && (S.tab === 'desk' || S.tab === 'tally') && tag !== 'INPUT' && tag !== 'SELECT' && !document.hidden && !S.offDirty && !S.showPw) { S.msg = ''; refresh(); }
+    if (S.admin && (S.tab === 'desk' || S.tab === 'tally') && tag !== 'INPUT' && tag !== 'SELECT' && !document.hidden && !S.offDirty && !S.showPw && !S.showDel) { S.msg = ''; refresh(); }
   }, 10000);
 
   api('GET', '/me').then(function (me) { S.admin = me; S.tab = me.role === 'chair' ? 'roster' : 'desk'; return refresh(); })

@@ -231,3 +231,32 @@ test('비밀번호 변경', async () => {
   for (let i = 0; i < 5; i++) await change('wrong' + i, 'brand-new-password-2');
   assert.equal((await change('brand-new-password-1', 'brand-new-password-2')).status, 429);
 });
+
+test('선거 삭제', async () => {
+  const env = setup();
+  const { chair, eid, cands, eligible } = await prepareElection(env);
+  await chair.call('POST', `/api/admin/elections/${eid}/start`);
+  const t = await chair.call('POST', `/api/admin/elections/${eid}/tickets`, { person_id: eligible[0].id });
+  await new Client(env, '9.9.9.9').call('POST', '/api/vote/submit', { token: t.data.token, choices: { [cands[0]]: 'Y', [cands[1]]: 'N' } });
+  await chair.call('POST', `/api/admin/elections/${eid}/offline`, { person_id: eligible[1].id });
+  const del = (title) => chair.call('DELETE', `/api/admin/elections/${eid}`, { confirm_title: title });
+  assert.equal((await del('시험 선거')).status, 409);            // 진행 중에는 삭제 불가
+  await chair.call('POST', `/api/admin/elections/${eid}/close`);
+  assert.equal((await del('다른 이름')).status, 400);            // 이름이 다르면 거절
+  const desk = new Client(env, '4.4.4.4');
+  await addAdmin(env, 'desk1', 'desk');
+  await desk.call('POST', '/api/admin/login', { username: 'desk1', password: 'long-enough-password' });
+  assert.equal((await desk.call('DELETE', `/api/admin/elections/${eid}`, { confirm_title: '시험 선거' })).status, 403);
+  assert.equal((await del('시험 선거')).status, 200);
+  const count = (tbl) => env.DB.raw.prepare(`SELECT count(*) AS n FROM ${tbl}`).get().n;
+  for (const tbl of ['election', 'person', 'roll', 'race', 'candidate', 'ticket', 'ballot', 'ballot_item', 'offline_voter', 'offline_tally', 'offline_count', 'person_photo']) {
+    assert.equal(count(tbl), 0, tbl);
+  }
+  const rows = env.DB.raw.prepare('SELECT action, election_id, detail FROM audit_log').all();
+  assert.equal(rows.length, 1);
+  assert.equal(rows[0].action, 'election.delete');
+  assert.equal(rows[0].election_id, null);
+  assert.equal(JSON.parse(rows[0].detail).ballots, 1);
+  assert.equal((await chair.call('GET', '/api/admin/elections')).data.length, 0);
+  assert.equal((await del('시험 선거')).status, 404);
+});
