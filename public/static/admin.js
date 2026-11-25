@@ -1,6 +1,10 @@
 (function () {
   'use strict';
   var app = document.getElementById('app');
+  function copyText(text, btn) {
+    var done = function (ok) { if (btn) { var o = btn.textContent; btn.textContent = ok ? '복사됨' : '길게 눌러 복사하세요'; setTimeout(function () { btn.textContent = o; }, 1500); } };
+    try { navigator.clipboard.writeText(text).then(function () { done(true); }, function () { done(false); }); } catch (e) { done(false); }
+  }
   var RULE = { half: '과반', twothirds: '3분의 2 이상' };
   var STAT = { none: ['미접수', ''], issued: ['QR 발급', 'warn'], used: ['투표 완료', 'ok'], offline: ['오프라인 투표', 'acc'] };
   var ACTION = {
@@ -425,12 +429,17 @@
       h('div', { class: 'stats' }, stat(d.voters, '선거인'), stat(d.issued, 'QR 발급'), stat(d.voted, '온라인 투표 완료'), stat(d.waiting, '발급 후 미투표'), stat(d.offline, '오프라인 투표 확인')), notice())];
     if (S.issued) {
       var q = h('div', { class: 'qr' });
+      var manualUrl = S.issued.url.split('#')[0];   // 토큰이 없는 투표 화면 주소(코드를 직접 입력)
       try { q.innerHTML = window.makeQrSvg(S.issued.url); } catch (e) { q.textContent = ''; }
       out.push(h('section', { class: 'card', id: 'qrcard' }, h('h3', null, '발급된 QR · ' + S.issued.name + ' ' + S.issued.role),
         h('div', { class: 'qrbox' }, q, h('div', { class: 'row', style: 'flex-direction:column;align-items:flex-start' },
           h('span', { class: 'note' }, 'QR이 스캔되지 않을 때 투표 화면에 입력하는 코드'), h('span', { class: 'tok' }, S.issued.token),
           h('span', { class: 'note' }, '이 QR로 한 번만 투표할 수 있습니다.'),
+          h('span', { class: 'note' }, '코드를 직접 입력해 투표하는 화면 주소'),
+          h('a', { class: 'manual', href: manualUrl, target: '_blank', rel: 'noopener' }, manualUrl),
           h('div', { class: 'row noprint' }, h('button', { class: 'btn primary', onclick: function () { window.print(); } }, 'QR 카드 인쇄'),
+            h('a', { class: 'btn', href: manualUrl, target: '_blank', rel: 'noopener' }, '코드 입력 화면 열기'),
+            h('button', { class: 'btn', onclick: function (e) { copyText(manualUrl, e.target); } }, '링크 복사'),
             h('button', { class: 'btn', onclick: function () { S.issued = null; render(); } }, '닫기'))))));
     }
     var tb = h('tbody');

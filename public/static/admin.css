@@ -64,3 +64,4 @@ details summary{cursor:pointer;color:var(--muted);font-size:13px}
 input[type=number]{width:96px}
 .okc{color:var(--yes);font-weight:700}
 .errc{color:var(--no);font-weight:700}
+.manual{font-size:14px;word-break:break-all;user-select:all}
