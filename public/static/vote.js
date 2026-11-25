@@ -1,8 +1,20 @@
 (function () {
   'use strict';
+  var BASE = (function () { var m = document.querySelector('meta[name="cv-base"]'); var b = m ? m.getAttribute('content') : ''; return b && b.charAt(0) === '/' ? b : ''; })();
   var app = document.getElementById('app');
   var RULE = { half: '과반', twothirds: '3분의 2 이상' };
   var state = { token: '', data: null, picks: {} };
+
+  // 교회 로고(왼쪽 위): 등록되어 있을 때만 보인다.
+  (function () {
+    var box = document.getElementById('brand'); if (!box) return;
+    var img = document.createElement('img');
+    img.className = 'logo'; img.alt = '교회 로고';
+    img.addEventListener('load', function () { box.hidden = false; });
+    img.addEventListener('error', function () { box.hidden = true; });
+    box.appendChild(img);
+    img.src = BASE + '/api/logo';
+  })();
 
   function append(el, c) {
     if (Array.isArray(c)) c.forEach(function (x) { append(el, x); });
@@ -33,7 +45,7 @@
     window.scrollTo(0, 0);
   }
   function api(path, body) {
-    return fetch('/api/vote/' + path, {
+    return fetch(BASE + '/api/vote/' + path, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(body)

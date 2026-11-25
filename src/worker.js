@@ -989,6 +989,41 @@ route('GET', '/api/photo/{pid}', null, async (c) => {
   return new Response(fromBase64(row.data_b64), { headers: { 'Content-Type': row.mime, 'Cache-Control': 'private, max-age=300' } });
 });
 
+// ---- 교회 로고 ----
+const LOGO_SQL = 'CREATE TABLE IF NOT EXISTS site_logo (id INTEGER PRIMARY KEY CHECK (id = 1), mime TEXT NOT NULL, data_b64 TEXT NOT NULL, updated_at TEXT NOT NULL)';
+let logoReady = false;
+async function ensureLogo(env) { if (!logoReady) { await env.DB.prepare(LOGO_SQL).run(); logoReady = true; } }
+
+route('GET', '/api/logo', null, async (c) => {
+  await ensureLogo(c.env);
+  const row = await one(c.env, 'SELECT mime, data_b64, updated_at FROM site_logo WHERE id = 1');
+  if (!row) throw new HttpError(404, '로고가 없습니다.');
+  const etag = '"' + row.updated_at + '-' + row.data_b64.length + '"';
+  const headers = { 'Content-Type': row.mime, 'Cache-Control': 'no-cache', ETag: etag };
+  if (c.req.headers.get('If-None-Match') === etag) return new Response(null, { status: 304, headers });
+  return new Response(fromBase64(row.data_b64), { headers });
+});
+
+route('PUT', '/api/admin/logo', 'chair', async (c) => {
+  if (c.raw.length > MAX_PHOTO) throw new HttpError(413, '로고 용량은 500KB 이하여야 합니다.');
+  const mime = detectImageMime(c.raw);
+  if (!mime) throw bad('PNG, JPG, WEBP 이미지만 올릴 수 있습니다.');
+  await ensureLogo(c.env);
+  await run(c.env,
+    'INSERT INTO site_logo (id, mime, data_b64, updated_at) VALUES (1,?,?,?) ' +
+    'ON CONFLICT(id) DO UPDATE SET mime=excluded.mime, data_b64=excluded.data_b64, updated_at=excluded.updated_at',
+    mime, toBase64(c.raw), iso());
+  await audit(c.env, c.admin.id, null, 'logo.upload', {});
+  return json({ ok: true });
+});
+
+route('DELETE', '/api/admin/logo', 'chair', async (c) => {
+  await ensureLogo(c.env);
+  await run(c.env, 'DELETE FROM site_logo WHERE id = 1');
+  await audit(c.env, c.admin.id, null, 'logo.delete', {});
+  return json({ ok: true });
+});
+
 // =====================================================================
 // 요청 처리
 // =====================================================================

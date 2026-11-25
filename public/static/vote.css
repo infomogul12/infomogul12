@@ -36,3 +36,7 @@ ul.sum li.is-n{border-left-color:var(--no);background:color-mix(in srgb,var(--no
 .pick.n{background:var(--no)}
 :focus-visible{outline:2px solid var(--accent);outline-offset:2px}
 @media (prefers-color-scheme:dark){.pick,.seg .y[aria-pressed="true"],.seg .n[aria-pressed="true"]{color:#0b1512}}
+
+.brand{max-width:640px;margin:0 auto;padding:16px 16px 0}
+.brand .logo{height:48px;width:auto;max-width:min(240px,60vw);object-fit:contain;display:block;border-radius:4px}
+@media (prefers-color-scheme:dark){.brand .logo{background:#fff;padding:3px 6px}}

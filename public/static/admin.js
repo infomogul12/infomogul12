@@ -1,14 +1,23 @@
 (function () {
   'use strict';
+  var BASE = (function () { var m = document.querySelector('meta[name="cv-base"]'); var b = m ? m.getAttribute('content') : ''; return b && b.charAt(0) === '/' ? b : ''; })();
   var app = document.getElementById('app');
   function copyText(text, btn) {
     var done = function (ok) { if (btn) { var o = btn.textContent; btn.textContent = ok ? '복사됨' : '길게 눌러 복사하세요'; setTimeout(function () { btn.textContent = o; }, 1500); } };
     try { navigator.clipboard.writeText(text).then(function () { done(true); }, function () { done(false); }); } catch (e) { done(false); }
   }
+  // 교회 로고: 없으면 보이지 않는다. 주소 끝의 v 값은 로고를 바꿨을 때 브라우저가 새 그림을 받게 한다.
+  function logoEl() {
+    var img = h('img', { class: 'logo', alt: '교회 로고', src: BASE + '/api/logo?v=' + S.logoV });
+    if (S.logoOk !== true) img.style.display = 'none';
+    img.addEventListener('load', function () { S.logoOk = true; img.style.display = ''; });
+    img.addEventListener('error', function () { S.logoOk = false; img.style.display = 'none'; });
+    return img;
+  }
   var RULE = { half: '과반', twothirds: '3분의 2 이상' };
   var STAT = { none: ['미접수', ''], issued: ['QR 발급', 'warn'], used: ['투표 완료', 'ok'], offline: ['오프라인 투표', 'acc'] };
   var ACTION = {
-    'election.create': '선거 생성', 'election.delete': '선거 삭제', 'election.hide': '선거 숨김', 'election.unhide': '선거 숨김 해제', 'election.backup': '백업 내려받기', 'election.restore': '백업으로 선거 복원', 'election.update': '선거 정보 수정', 'election.start': '투표 시작', 'election.close': '투표 종료',
+    'logo.upload': '교회 로고 등록', 'logo.delete': '교회 로고 삭제', 'election.create': '선거 생성', 'election.delete': '선거 삭제', 'election.hide': '선거 숨김', 'election.unhide': '선거 숨김 해제', 'election.backup': '백업 내려받기', 'election.restore': '백업으로 선거 복원', 'election.update': '선거 정보 수정', 'election.start': '투표 시작', 'election.close': '투표 종료',
     'people.import': '교적부 불러오기', 'people.member_ok': '무흠 입교 체크', 'roll.lock': '선거인명부 확정', 'roll.unlock': '선거인명부 확정 취소',
     'race.create': '투표 항목 추가', 'race.rule': '가결 기준 변경', 'race.delete': '투표 항목 삭제',
     'candidate.add': '후보 추가', 'candidate.delete': '후보 삭제', 'photo.upload': '후보 사진 등록', 'photo.delete': '후보 사진 삭제',
@@ -18,7 +27,7 @@
   var S = {
     admin: null, elections: [], eid: null, prog: null, tab: 'roster', people: [], races: [], desk: [],
     results: null, audit: [], q: { roster: '', voters: '', desk: '' }, msg: '', err: '', issued: null,
-    confirmClose: false, showNew: false, showPw: false, showDel: false, showBackup: false, showHidden: false, showRestore: false, stripTime: true, hidden: [], imported: null, pv: {}, offline: null, offForm: null, offDirty: false
+    confirmClose: false, showNew: false, showPw: false, showDel: false, showBackup: false, showHidden: false, showRestore: false, showLogo: false, logoV: Date.now(), logoOk: null, stripTime: true, hidden: [], imported: null, pv: {}, offline: null, offForm: null, offDirty: false
   };
 
   /* ---------- 도우미 ---------- */
@@ -44,7 +53,7 @@
     var opt = { method: method, headers: { 'X-Requested-With': 'fetch' }, credentials: 'same-origin' };
     if (raw) { opt.body = raw.body; opt.headers['Content-Type'] = raw.type || 'application/octet-stream'; }
     else if (body !== undefined) { opt.body = JSON.stringify(body); opt.headers['Content-Type'] = 'application/json'; }
-    return fetch('/api/admin' + path, opt).then(function (r) {
+    return fetch(BASE + '/api/admin' + path, opt).then(function (r) {
       return r.json().catch(function () { return {}; }).then(function (d) {
         if (!r.ok) {
           var e = new Error(typeof d.detail === 'string' ? d.detail : '요청을 처리하지 못했습니다. 잠시 후 다시 시도하세요.');
@@ -128,7 +137,7 @@
         .catch(function (e) { renderLogin(e.message); });
     };
     p.addEventListener('keydown', function (e) { if (e.key === 'Enter') go(); });
-    app.replaceChildren(h('div', { class: 'card login' }, h('h1', null, '교회 선출투표 관리'),
+    app.replaceChildren(h('div', { class: 'card login' }, h('div', { class: 'brandrow' }, logoEl()), h('h1', null, '교회 선출투표 관리'),
       h('label', { class: 'f', for: 'u' }, '아이디', u), h('label', { class: 'f', for: 'p' }, '비밀번호', p),
       message ? h('div', { class: 'msg err', role: 'alert' }, message) : null,
       h('button', { class: 'btn primary', onclick: go }, '로그인')));
@@ -158,7 +167,7 @@
   }
 
   /* ---------- 백업, 숨기기 ---------- */
-  function backupHref(id) { return '/api/admin/elections/' + id + '/backup' + (S.stripTime ? '?strip_time=1' : ''); }
+  function backupHref(id) { return BASE + '/api/admin/elections/' + id + '/backup' + (S.stripTime ? '?strip_time=1' : ''); }
   function stripOption(onchange) {
     var box = h('input', { type: 'checkbox', id: 'strip', style: 'width:auto' });
     box.checked = S.stripTime;
@@ -223,6 +232,45 @@
       h('div', { class: 'row' }, go, h('button', { class: 'btn', onclick: function () { S.showRestore = false; render(); } }, '닫기')));
   }
 
+  /* ---------- 교회 로고 ---------- */
+  // 올릴 때 브라우저에서 가로 480 · 세로 120 이내로 줄이고 PNG(투명 배경 유지)로 저장한다.
+  function resizeLogo(file) {
+    return new Promise(function (resolve, reject) {
+      if (!/^image\//.test(file.type)) return reject(new Error('이미지 파일을 선택하세요.'));
+      var fr = new FileReader();
+      fr.onerror = function () { reject(new Error('이미지를 읽지 못했습니다.')); };
+      fr.onload = function () {
+        var img = new Image();
+        img.onerror = function () { reject(new Error('이미지 형식을 읽지 못했습니다. PNG나 JPG 파일을 사용하세요.')); };
+        img.onload = function () {
+          var sc = Math.min(480 / img.width, 120 / img.height, 1), w = Math.max(1, Math.round(img.width * sc)), hh = Math.max(1, Math.round(img.height * sc));
+          var c = document.createElement('canvas'); c.width = w; c.height = hh;
+          c.getContext('2d').drawImage(img, 0, 0, w, hh);
+          c.toBlob(function (b) { b ? resolve(b) : reject(new Error('이미지를 변환하지 못했습니다.')); }, 'image/png');
+        };
+        img.src = fr.result;
+      };
+      fr.readAsDataURL(file);
+    });
+  }
+  function logoCard() {
+    var fi = h('input', { type: 'file', id: 'logofile', accept: 'image/png,image/jpeg,image/webp', style: 'display:none' });
+    fi.addEventListener('change', function () {
+      var f = fi.files && fi.files[0]; if (!f) return;
+      act(function () {
+        return resizeLogo(f).then(function (blob) { return api('PUT', '/logo', undefined, { body: blob, type: 'image/png' }); })
+          .then(function () { S.logoV = Date.now(); S.logoOk = null; S.msg = '교회 로고를 저장했습니다.'; });
+      });
+    });
+    return h('section', { class: 'card' }, h('h2', null, '교회 로고'),
+      h('p', { class: 'lead' }, '관리자 화면과 투표 화면의 왼쪽 위에 표시됩니다. 가로로 긴 로고(투명 배경 PNG 권장)를 올리면 자동으로 알맞은 크기로 줄여 저장합니다.'),
+      h('div', { class: 'brandrow' }, logoEl(), S.logoOk === false ? h('span', { class: 'note' }, '등록된 로고가 없습니다.') : null),
+      fi,
+      h('div', { class: 'row' }, h('label', { class: 'btn primary', for: 'logofile' }, S.logoOk === false ? '로고 올리기' : '로고 변경'),
+        S.logoOk !== false ? h('button', { class: 'btn danger', onclick: function () { act(function () { return api('DELETE', '/logo').then(function () { S.logoV = Date.now(); S.logoOk = false; S.msg = '교회 로고를 삭제했습니다.'; }); }); } }, '로고 삭제') : null,
+        h('button', { class: 'btn', onclick: function () { S.showLogo = false; render(); } }, '닫기')));
+  }
+
   /* ---------- 선거 삭제 ---------- */
   function deleteCard() {
     var el = S.elections.find(function (e) { return e.id === S.eid; });
@@ -250,14 +298,16 @@
       var o = h('option', { value: e.id }, e.title); if (e.id === S.eid) o.selected = true; return o;
     }));
     sel.addEventListener('change', function () { S.eid = +sel.value; S.issued = null; S.imported = null; S.confirmClose = false; refresh(); });
-    var left = h('div', null, h('h1', null, el ? el.title : '교회 선출투표'),
+    var leftText = h('div', null, h('h1', null, el ? el.title : '교회 선출투표'),
       h('div', { class: 'row', style: 'margin-top:6px' }, S.elections.length > 1 ? sel : null,
         isChair() ? h('button', { class: 'btn sm', onclick: function () { S.showNew = !S.showNew; render(); } }, '새 선거') : null,
         isChair() && el && S.prog && S.prog.phase === 'closed' ? h('button', { class: 'btn sm', onclick: function () { S.showBackup = !S.showBackup; render(); } }, '백업') : null,
         isChair() && el && S.prog && S.prog.phase === 'closed' ? h('button', { class: 'btn sm', onclick: function () { hideElection(el); } }, '숨기기') : null,
         isChair() ? h('button', { class: 'btn sm', onclick: function () { S.showRestore = !S.showRestore; render(); } }, '백업에서 복원') : null,
+        isChair() ? h('button', { class: 'btn sm', onclick: function () { S.showLogo = !S.showLogo; render(); } }, '교회 로고') : null,
         isChair() && S.hidden.length ? h('button', { class: 'btn sm', onclick: function () { S.showHidden = !S.showHidden; render(); } }, '숨긴 선거 (' + S.hidden.length + ')') : null,
         isChair() && el && S.prog && S.prog.phase !== 'open' ? h('button', { class: 'btn sm danger', onclick: function () { S.showDel = !S.showDel; render(); } }, '선거 삭제') : null));
+    var left = h('div', { class: 'brandrow' }, logoEl(), leftText);
     var right = h('div', { class: 'row' }, phaseControls(), h('span', { class: 'note' }, S.admin.username + ' (' + (isChair() ? '선거관리위원장' : '접수 담당') + ')'),
       h('button', { class: 'btn sm', onclick: function () { S.showPw = !S.showPw; render(); } }, '비밀번호 변경'),
       h('button', { class: 'btn sm', onclick: function () { api('POST', '/logout').catch(function () {}).then(function () { S.admin = null; renderLogin(); }); } }, '로그아웃'));
@@ -313,7 +363,7 @@
     var out = [h('section', { class: 'card' }, h('h2', null, '교적부 불러오기'),
       h('p', { class: 'lead' }, '직분, 이름, 생년월일, 등록일이 들어 있는 엑셀(.xlsx) 또는 CSV 파일을 올리세요. 첫 행은 제목 행으로 읽고, 형식이 틀린 행과 중복 행은 제외합니다. 열 제목에 "무흠" 또는 "입교"가 들어간 열이 있으면 무흠 입교 여부로 함께 읽습니다.'),
       h('div', { class: 'row' }, h('label', { class: 'btn primary', for: 'xl', style: locked ? 'opacity:.45;pointer-events:none' : '' }, '파일 선택'), file,
-        h('a', { href: '/static/sample.csv', download: 'sample.csv', class: 'btn' }, '예시 파일 받기')),
+        h('a', { href: BASE + '/static/sample.csv', download: 'sample.csv', class: 'btn' }, '예시 파일 받기')),
       locked ? h('p', { class: 'note' }, '명부가 확정되었거나 투표가 시작되어 다시 올릴 수 없습니다.') : h('p', { class: 'note' }, '다시 올리면 기존 교적부, 후보, 사진이 모두 새로 시작됩니다.'),
       notice())];
     out.push(h('section', { class: 'card' }, h('div', { class: 'row' }, h('h2', { class: 'grow' }, '불러온 교적부 ', pill(S.people.length + '명')), searchBox('roster', fill)),
@@ -584,6 +634,7 @@
     if (S.showBackup && isChair()) { var bc = backupCard(); if (bc) nodes.push(bc); }
     if (S.showHidden && isChair() && S.hidden.length) nodes.push(hiddenCard());
     if (S.showRestore && isChair()) nodes.push(restoreCard());
+    if (S.showLogo && isChair()) nodes.push(logoCard());
     if (S.showNew && isChair()) nodes.push(newElectionCard());
     if (!S.eid || !S.prog) {
       nodes.push(h('section', { class: 'card' }, h('h2', null, '선거가 없습니다'),
@@ -602,7 +653,7 @@
   // 접수·개표 화면은 10초마다 진행 상황을 새로 고친다(입력 중일 때는 건너뛴다).
   setInterval(function () {
     var tag = document.activeElement && document.activeElement.tagName;
-    if (S.admin && (S.tab === 'desk' || S.tab === 'tally') && tag !== 'INPUT' && tag !== 'SELECT' && !document.hidden && !S.offDirty && !S.showPw && !S.showDel && !S.showBackup && !S.showHidden && !S.showRestore) { S.msg = ''; refresh(); }
+    if (S.admin && (S.tab === 'desk' || S.tab === 'tally') && tag !== 'INPUT' && tag !== 'SELECT' && !document.hidden && !S.offDirty && !S.showPw && !S.showDel && !S.showBackup && !S.showHidden && !S.showRestore && !S.showLogo) { S.msg = ''; refresh(); }
   }, 10000);
 
   api('GET', '/me').then(function (me) { S.admin = me; S.tab = me.role === 'chair' ? 'roster' : 'desk'; return refresh(); })

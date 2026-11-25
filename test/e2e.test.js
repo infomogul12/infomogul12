@@ -381,3 +381,26 @@ test('백업 파일로 선거 복원', async () => {
   assert.equal((await chair.call('POST', '/api/admin/elections/restore', {})).status, 400);
   assert.deepEqual([count('election'), count('person'), count('ballot')], before);
 });
+
+test('교회 로고: 위원장만 올리고, 누구나 보며, 삭제하면 바로 사라진다', async () => {
+  const env = setup();
+  await addAdmin(env, 'chair1', 'chair');
+  await addAdmin(env, 'desk1', 'desk');
+  const chair = new Client(env);
+  await chair.call('POST', '/api/admin/login', { username: 'chair1', password: 'long-enough-password' });
+  const desk = new Client(env, '2.2.2.2');
+  await desk.call('POST', '/api/admin/login', { username: 'desk1', password: 'long-enough-password' });
+  const png = new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 1, 2, 3]);
+  assert.equal((await worker.fetch(new Request('https://x/api/logo'), env)).status, 404);
+  assert.equal((await desk.call('PUT', '/api/admin/logo', png)).status, 403);
+  assert.equal((await chair.call('PUT', '/api/admin/logo', new Uint8Array([1, 2, 3, 4]))).status, 400);
+  assert.equal((await chair.call('PUT', '/api/admin/logo', png)).status, 200);
+  const r = await worker.fetch(new Request('https://x/api/logo'), env);
+  assert.equal(r.status, 200);
+  assert.equal(r.headers.get('Content-Type'), 'image/png');
+  assert.deepEqual([...new Uint8Array(await r.arrayBuffer())], [...png]);
+  const r2 = await worker.fetch(new Request('https://x/api/logo', { headers: { 'If-None-Match': r.headers.get('ETag') } }), env);
+  assert.equal(r2.status, 304);
+  assert.equal((await chair.call('DELETE', '/api/admin/logo')).status, 200);
+  assert.equal((await worker.fetch(new Request('https://x/api/logo'), env)).status, 404);
+});
